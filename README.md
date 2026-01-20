@@ -1,3 +1,11 @@
+## Correction Notice：
+During ongoing analysis and validation efforts, we identified and corrected​ an inadvertent data error in Figure.4 of our original publication.
+The updated visualizations maintain our key finding: the model remains effective in cold-start scenarios.
+
+**Updated figure**: visits.png
+![Corrected](visits.png)
+
+
 # Data and Code for Paper "DrugDoctor"
 Our model was implemented using PyTorch 1.9.1 with Python 3.8 and trained on an NVIDIA GeForce RTX 4090 GPU.
 ## Folder Specification
