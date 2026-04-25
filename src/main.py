@@ -8,6 +8,7 @@ from sklearn.metrics import jaccard_score
 from torch.optim import Adam
 import os
 import sys
+import types
 import torch
 import time
 try:
@@ -32,6 +33,8 @@ from data_loader import mimic_data, pad_batch_v2_train, pad_batch_v2_eval, pad_n
 # Older pickles in this repo may reference Voc as `src.util.Voc`.
 # When running `python src/main.py`, the loaded module name is `util`,
 # so register an alias to keep dill unpickling stable across entrypoints.
+src_package = sys.modules.setdefault("src", types.ModuleType("src"))
+setattr(src_package, "util", util_module)
 sys.modules.setdefault("src.util", util_module)
 
 
