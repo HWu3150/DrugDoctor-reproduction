@@ -1,0 +1,6 @@
+.codex
+*.pyc
+__pycache__/
+__MACOSX/
+.DS_Store
+data/input/drugbank_drugs_info.csv

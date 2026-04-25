@@ -5,6 +5,8 @@ from sklearn.metrics import (
     f1_score,
     average_precision_score,
 )
+import json
+import csv
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import train_test_split
@@ -13,14 +15,104 @@ import random
 import warnings
 import dill
 from collections import Counter
-from rdkit import Chem
 from collections import defaultdict
-import torch
-from ogb.utils import smiles2graph
-from torch_geometric.data import Data
+try:
+    import torch
+except ModuleNotFoundError:
+    torch = None
+try:
+    from rdkit import Chem
+except ModuleNotFoundError:
+    Chem = None
+
+try:
+    from ogb.utils import smiles2graph
+    from torch_geometric.data import Data
+except ModuleNotFoundError:
+    smiles2graph = None
+    Data = None
 
 
 warnings.filterwarnings("ignore")
+
+
+class Voc(object):
+    def __init__(self):
+        self.idx2word = {}
+        self.word2idx = {}
+
+    def add_sentence(self, sentence):
+        for word in sentence:
+            if word not in self.word2idx:
+                self.idx2word[len(self.word2idx)] = word
+                self.word2idx[word] = len(self.word2idx)
+
+
+def load_patient_records_from_jsonl(jsonl_path):
+    patient_records = []
+    with open(jsonl_path, "r", encoding="utf-8") as handle:
+        for line_no, line in enumerate(handle, start=1):
+            line = line.strip()
+            if not line:
+                continue
+            obj = json.loads(line)
+            records = obj.get("records") or {}
+            diagnoses = records.get("diagnosis") or []
+            procedures = records.get("procedure") or []
+            medications = records.get("medication") or []
+
+            if not (len(diagnoses) == len(procedures) == len(medications)):
+                raise ValueError(
+                    f"Line {line_no} has mismatched visit lengths: "
+                    f"diag={len(diagnoses)}, proc={len(procedures)}, med={len(medications)}"
+                )
+
+            patient = []
+            for diag_codes, proc_codes, med_codes in zip(diagnoses, procedures, medications):
+                patient.append(
+                    [
+                        [str(code).strip() for code in diag_codes if str(code).strip()],
+                        [str(code).strip() for code in proc_codes if str(code).strip()],
+                        [str(code).strip() for code in med_codes if str(code).strip()],
+                    ]
+                )
+
+            if patient:
+                patient_records.append(patient)
+    return patient_records
+
+
+def build_vocab_and_records_from_patient_records(patient_records):
+    diag_voc = Voc()
+    med_voc = Voc()
+    pro_voc = Voc()
+
+    for patient in patient_records:
+        for visit in patient:
+            diag_voc.add_sentence(visit[0])
+            pro_voc.add_sentence(visit[1])
+            med_voc.add_sentence(visit[2])
+
+    encoded_records = []
+    for patient in patient_records:
+        encoded_patient = []
+        for visit in patient:
+            encoded_patient.append(
+                [
+                    [diag_voc.word2idx[code] for code in visit[0]],
+                    [pro_voc.word2idx[code] for code in visit[1]],
+                    [med_voc.word2idx[code] for code in visit[2]],
+                ]
+            )
+        encoded_records.append(encoded_patient)
+
+    voc = {"diag_voc": diag_voc, "pro_voc": pro_voc, "med_voc": med_voc}
+    return encoded_records, voc
+
+
+def load_jsonl_data_and_voc(jsonl_path):
+    patient_records = load_patient_records_from_jsonl(jsonl_path)
+    return build_vocab_and_records_from_patient_records(patient_records)
 
 
 def get_n_params(model):
@@ -242,9 +334,9 @@ def multi_label_metric(y_gt, y_pred, y_prob):
     return ja, prauc, np.mean(avg_prc), np.mean(avg_recall), np.mean(avg_f1)
 
 
-def ddi_rate_score(record, path="../data/output/ddi_A_final.pkl"):
+def ddi_rate_score(record, path="../data/output/ddi_A_final.pkl", ddi_adj=None):
     # ddi rate
-    ddi_A = dill.load(open(path, "rb"))
+    ddi_A = ddi_adj if ddi_adj is not None else dill.load(open(path, "rb"))
     all_cnt = 0
     dd_cnt = 0
     for med_code_set in record:
@@ -258,6 +350,46 @@ def ddi_rate_score(record, path="../data/output/ddi_A_final.pkl"):
     if all_cnt == 0:
         return 0
     return dd_cnt / all_cnt
+
+
+def load_ddi_adj_from_atc_csv(csv_path, med_voc):
+    with open(csv_path, "r", encoding="utf-8", newline="") as handle:
+        reader = csv.reader(handle)
+        header = next(reader)
+        col_codes = [code.strip() for code in header[1:]]
+
+        row_map = {}
+        for row in reader:
+            row_code = row[0].strip()
+            values = row[1:]
+            if len(values) != len(col_codes):
+                raise ValueError(
+                    f"Malformed DDI csv row for {row_code}: "
+                    f"{len(values)} values vs {len(col_codes)} columns"
+                )
+            row_map[row_code] = {
+                col_code: float(value) for col_code, value in zip(col_codes, values)
+            }
+
+    med_codes = [med_voc.idx2word[i] for i in range(len(med_voc.idx2word))]
+    ddi_adj = np.zeros((len(med_codes), len(med_codes)), dtype=np.float32)
+    matched_codes = 0
+
+    for i, code_i in enumerate(med_codes):
+        row = row_map.get(code_i)
+        if row is None:
+            continue
+        matched_codes += 1
+        for j, code_j in enumerate(med_codes):
+            value = row.get(code_j)
+            if value is not None:
+                ddi_adj[i, j] = value
+
+    print(
+        f"loaded ddi csv: matched {matched_codes}/{len(med_codes)} med vocab codes "
+        f"from {csv_path}"
+    )
+    return ddi_adj
 
 
 def create_atoms(mol, atom_dict):
@@ -327,6 +459,10 @@ def extract_fingerprints(radius, atoms, i_jbond_dict, fingerprint_dict, edge_dic
 
 
 def buildMPNN(molecule, med_voc, radius=1, device="cpu:0"):
+    if Chem is None:
+        raise RuntimeError("RDKit is required for molecule processing but is not installed.")
+    if torch is None:
+        raise RuntimeError("PyTorch is required for molecule processing but is not installed.")
 
     atom_dict = defaultdict(lambda: len(atom_dict))
     bond_dict = defaultdict(lambda: len(bond_dict))
@@ -383,6 +519,12 @@ def buildMPNN(molecule, med_voc, radius=1, device="cpu:0"):
 
 
 def graph_batch_from_smile(smiles_list):
+    if torch is None:
+        raise RuntimeError("PyTorch is required for graph construction but is not installed.")
+    if smiles2graph is None or Data is None:
+        raise RuntimeError(
+            "OGB and torch-geometric are required for graph construction but are not installed."
+        )
     edge_idxes, edge_feats, node_feats, lstnode, batch = [], [], [], 0, []
     graphs = [smiles2graph(x) for x in smiles_list]
     for idx, graph in enumerate(graphs):
@@ -506,7 +648,7 @@ def patient_to_visit(data,voc_size):
     # 用于存储 真正打乱后的 visit的 diagnose，procedure，medicine 信息。
     # 都是list，长度都是visit数，list内部元素是长度不等的对应数据编码
     shuffled_med_emb = np.zeros(
-        (total_visit, 112)
+        (total_visit, voc_size[2])
     )  # array 二维数组，元素是0,1，表示打乱后的 全部visit的真实用药，行是visit数
     for i in range(total_visit):
         shuffled_diag.append(diag_list[final_shuffled_index[i]])
@@ -529,7 +671,7 @@ def patient_to_visit(data,voc_size):
             newList2 = []
             for j in range(count):
                 newList1.append(data[patient_id][j][2])#data[patient_id][j][2]表示这个病人的第j次visit的用药数据
-                temp = np.zeros(112)
+                temp = np.zeros(voc_size[2])
                 temp[data[patient_id][j][2]] = 1
                 newList2.append(temp)
         used_med.append(newList1)

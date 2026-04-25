@@ -10,8 +10,20 @@ import os
 import sys
 import torch
 import time
+try:
+    import wandb
+except ImportError:
+    wandb = None
 from models import AIModel
-from util import llprint, patient_to_visit,sequence_metric, ddi_rate_score, graph_batch_from_smile, get_n_params
+from util import (
+    llprint,
+    patient_to_visit,
+    sequence_metric,
+    ddi_rate_score,
+    graph_batch_from_smile,
+    get_n_params,
+    load_ddi_adj_from_atc_csv,
+)
 import torch.nn.functional as F
 from torch.utils.data.dataloader import DataLoader
 from data_loader import mimic_data, pad_batch_v2_train, pad_batch_v2_eval, pad_num_replace
@@ -59,13 +71,74 @@ parser.add_argument("--kp", type=float, default=0.05, help="coefficient of P sig
 parser.add_argument("--dim", type=int, default=64, help="dimension")
 parser.add_argument("--cuda", type=int, default=0, help="which cuda")
 parser.add_argument('--threshold', type=float, default=0.4, help='the threshold of prediction')
+parser.add_argument(
+    "--records_path",
+    type=str,
+    default="../data/output/records_final.pkl",
+    help="Path to preprocessed records_final.pkl.",
+)
+parser.add_argument(
+    "--voc_path",
+    type=str,
+    default="../data/output/voc_final.pkl",
+    help="Path to preprocessed voc_final.pkl.",
+)
+parser.add_argument(
+    "--ddi_csv_path",
+    type=str,
+    default="../data/output/ddi_adj_matrix_atc4.csv",
+    help="Path to ATC-L4 DDI adjacency csv whose rows and columns are ATC codes.",
+)
+parser.add_argument(
+    "--substruct_smiles_path",
+    type=str,
+    default="../data/output/substructure_smiles_atc4.pkl",
+    help="Path to substructure_smiles pkl used by the GNN branch.",
+)
+parser.add_argument(
+    "--use_wandb",
+    action="store_true",
+    default=False,
+    help="Enable Weights & Biases logging.",
+)
+parser.add_argument(
+    "--wandb_project",
+    type=str,
+    default="DrugDoctor",
+    help="WandB project name.",
+)
+parser.add_argument(
+    "--wandb_entity",
+    type=str,
+    default=None,
+    help="Optional WandB entity/team name.",
+)
+parser.add_argument(
+    "--wandb_name",
+    type=str,
+    default=None,
+    help="Optional WandB run name.",
+)
+parser.add_argument(
+    "--wandb_group",
+    type=str,
+    default=None,
+    help="Optional WandB run group.",
+)
+parser.add_argument(
+    "--wandb_mode",
+    type=str,
+    default="online",
+    choices=["online", "offline", "disabled"],
+    help="WandB mode.",
+)
 
 args = parser.parse_args()
 print(vars(args))
 
 
 # evaluate
-def eval(model, eval_dataloader,drug_data, voc_size, device, TOKENS, args):
+def eval(model, eval_dataloader,drug_data, voc_size, device, TOKENS, args, ddi_adj):
     model.eval()
     END_TOKEN, DIAG_PAD_TOKEN, PROC_PAD_TOKEN, MED_PAD_TOKEN, SOS_TOKEN = TOKENS
     smm_record = []
@@ -117,7 +190,7 @@ def eval(model, eval_dataloader,drug_data, voc_size, device, TOKENS, args):
                 
 
     # ddi rate
-    ddi_rate = ddi_rate_score(smm_record, path="../data/output/ddi_A_final.pkl")
+    ddi_rate = ddi_rate_score(smm_record, ddi_adj=ddi_adj)
 
     llprint(
         "DDI Rate: {:.4}, Jaccard: {:.4},  PRAUC: {:.4}, AVG_PRC: {:.4}, AVG_RECALL: {:.4}, AVG_F1: {:.4}, AVG_MED: {:.4}\n".format(
@@ -154,24 +227,16 @@ def main():
     # 记录 traceback 异常信息
     sys.stderr = Logger(log_file_name)
     print(vars(args))
+    if args.use_wandb and wandb is None:
+        raise ImportError(
+            "wandb is not installed. Install it first or run without --use_wandb."
+        )
 
-    data_path = "../data/output/records_final.pkl"
-    voc_path = "../data/output/voc_final.pkl"
-
-    ddi_adj_path = "../data/output/ddi_A_final.pkl"
-    ddi_mask_path = "../data/output/ddi_mask_H.pkl"
-    molecule_path = "../data/output/atc3toSMILES.pkl"
-    substruct_smile_path = '../data/output/substructure_smiles.pkl'
     device = torch.device("cuda:{}".format(args.cuda))
     # device = 'cpu'
-    
-    ddi_adj = dill.load(open(ddi_adj_path, "rb"))  
-    ddi_mask_H = dill.load(open(ddi_mask_path, "rb"))  
-    data_all = dill.load(open(data_path, "rb"))
-    molecule = dill.load(
-        open(molecule_path, "rb")
-    )  
-    voc = dill.load(open(voc_path, "rb"))  
+
+    data_all = dill.load(open(args.records_path, "rb"))
+    voc = dill.load(open(args.voc_path, "rb"))
     diag_voc, pro_voc, med_voc = (
         voc["diag_voc"],
         voc["pro_voc"],
@@ -182,7 +247,8 @@ def main():
             len(diag_voc.idx2word),
             len(pro_voc.idx2word),
             len(med_voc.idx2word),
-        )  
+        )
+    ddi_adj = load_ddi_adj_from_atc_csv(args.ddi_csv_path, med_voc)
     
     END_TOKEN = voc_size[2] + 1
     DIAG_PAD_TOKEN = voc_size[0] + 2
@@ -193,7 +259,7 @@ def main():
     
 
     
-    with open(substruct_smile_path, 'rb') as Fin:
+    with open(args.substruct_smiles_path, 'rb') as Fin:
         substruct_smiles_list = dill.load(Fin) 
     substruct_graphs = graph_batch_from_smile(substruct_smiles_list)
     substruct_forward = {'batched_data': substruct_graphs.to(device)}
@@ -203,7 +269,6 @@ def main():
     } #模型初始化时用到
     drug_data = {
         'substruct_data': substruct_forward,
-        'ddi_mask_H': ddi_mask_H,
         'tensor_ddi_adj': ddi_adj
     } # 模型训练时用到
 
@@ -226,6 +291,9 @@ def main():
     print("data_train-size:", len(data_train))
     print("data_test-size:", len(data_test))
     print("data_eval-size:", len(data_eval))
+    print("visit_train-size:", len(data_train_v))
+    print("visit_test-size:", len(data_test_v))
+    print("visit_eval-size:", len(data_eval_v))
     ###############################################################################################
     
     
@@ -254,6 +322,31 @@ def main():
     print('parameters:', get_n_params(model))
     print(model)
 
+    if args.use_wandb:
+        wandb.init(
+            project=args.wandb_project,
+            entity=args.wandb_entity,
+            name=args.wandb_name,
+            group=args.wandb_group,
+            mode=args.wandb_mode,
+            config=vars(args),
+        )
+        wandb.config.update(
+            {
+                "diag_vocab_size": voc_size[0],
+                "proc_vocab_size": voc_size[1],
+                "med_vocab_size": voc_size[2],
+                "patient_train_size": len(data_train),
+                "patient_eval_size": len(data_eval),
+                "patient_test_size": len(data_test),
+                "visit_train_size": len(data_train_v),
+                "visit_eval_size": len(data_eval_v),
+                "visit_test_size": len(data_test_v),
+                "substructure_vocab_size": len(substruct_smiles_list),
+                "model_parameters": get_n_params(model),
+            }
+        )
+
     print("Test:", args.Test)
     ############################## testing stage ###############################
     if args.Test:
@@ -271,7 +364,7 @@ def main():
             test_dataset = mimic_data(data_test_v)
             test_dataloader = DataLoader(test_dataset, batch_size=16, collate_fn=pad_batch_v2_eval, shuffle=False, pin_memory=True)
             with torch.set_grad_enabled(False):
-                ddi_rate, ja, prauc, avg_p, avg_r, avg_f1, avg_med = eval(model, test_dataloader, drug_data, voc_size, device, TOKENS, args)
+                ddi_rate, ja, prauc, avg_p, avg_r, avg_f1, avg_med = eval(model, test_dataloader, drug_data, voc_size, device, TOKENS, args, ddi_adj)
                 result.append([ddi_rate, ja, avg_f1, prauc, avg_med])
         
         result = np.array(result)
@@ -283,6 +376,22 @@ def main():
             outstring += "{:.4f} $\pm$ {:.4f} & ".format(m, s)
 
         print (outstring)
+        if args.use_wandb:
+            wandb.log(
+                {
+                    "test/ddi_rate_mean": mean[0],
+                    "test/jaccard_mean": mean[1],
+                    "test/avg_f1_mean": mean[2],
+                    "test/prauc_mean": mean[3],
+                    "test/avg_med_mean": mean[4],
+                    "test/ddi_rate_std": std[0],
+                    "test/jaccard_std": std[1],
+                    "test/avg_f1_std": std[2],
+                    "test/prauc_std": std[3],
+                    "test/avg_med_std": std[4],
+                }
+            )
+            wandb.finish()
 
         print ('test time: {}'.format(time.time() - tic))
         return
@@ -302,6 +411,9 @@ def main():
         print("epoch {} --------------------------".format(epoch))
 
         model.train()
+        epoch_loss = []
+        epoch_loss_bce = []
+        epoch_loss_ddi = []
 
         for idx, data in enumerate(train_dataloader):
             diagnoses, procedures, medications, used_medic,used_diag,used_proc, med_true,used_med_true,\
@@ -324,12 +436,18 @@ def main():
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
+            epoch_loss.append(loss.item())
+            epoch_loss_bce.append(loss_current.item())
+            epoch_loss_ddi.append(loss_ddi.item())
 
         
         print()
         tic2 = time.time()
+        train_loss = float(np.mean(epoch_loss)) if epoch_loss else 0.0
+        train_loss_bce = float(np.mean(epoch_loss_bce)) if epoch_loss_bce else 0.0
+        train_loss_ddi = float(np.mean(epoch_loss_ddi)) if epoch_loss_ddi else 0.0
         
-        ddi_rate, ja, prauc, avg_p, avg_r, avg_f1, avg_med = eval(model, eval_dataloader, drug_data, voc_size, device, TOKENS, args)
+        ddi_rate, ja, prauc, avg_p, avg_r, avg_f1, avg_med = eval(model, eval_dataloader, drug_data, voc_size, device, TOKENS, args, ddi_adj)
         print ('training time: {}, test time: {}'.format(time.time() - tic, time.time() - tic2))
 
         history['ja'].append(ja)
@@ -362,6 +480,25 @@ def main():
         )
 
         print("best_epoch: {}".format(best_epoch))
+        if args.use_wandb:
+            wandb.log(
+                {
+                    "epoch": epoch,
+                    "train/loss": train_loss,
+                    "train/loss_bce": train_loss_bce,
+                    "train/loss_ddi": train_loss_ddi,
+                    "eval/ddi_rate": ddi_rate,
+                    "eval/jaccard": ja,
+                    "eval/prauc": prauc,
+                    "eval/precision": avg_p,
+                    "eval/recall": avg_r,
+                    "eval/f1": avg_f1,
+                    "eval/prediction_set_size": avg_med,
+                    "best/jaccard": best_ja,
+                    "best/epoch": best_epoch,
+                },
+                step=epoch,
+            )
         
         if epoch - best_epoch > 10:
             break
@@ -377,6 +514,8 @@ def main():
             "wb",
         ),
     )
+    if args.use_wandb:
+        wandb.finish()
 
 
 if __name__ == "__main__":
