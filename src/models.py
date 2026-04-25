@@ -44,7 +44,7 @@ class AIModel(nn.Module):
 
         # used_med 编码映射模块
         self.used_med_embedding = nn.Sequential(
-            nn.Embedding(voc_size[2]+3, voc_size[2], self.MED_PAD_TOKEN),
+            nn.Embedding(voc_size[2]+3, emb_dim, self.MED_PAD_TOKEN),
             nn.Dropout(0.3)
         )
         
@@ -65,7 +65,7 @@ class AIModel(nn.Module):
 
         # used_med RNN模块
         self.encoders = nn.Sequential(
-            nn.GRU(voc_size[2], voc_size[2], batch_first=True),   
+            nn.GRU(emb_dim, voc_size[2], batch_first=True),
         )
 
         # 子结构编码
@@ -518,6 +518,5 @@ class GCNConv(MessagePassing):
 
     def update(self, aggr_out):
         return aggr_out
-
 
 
