@@ -50,11 +50,7 @@ np.random.seed(2048)
 
 # setting
 model_name = "AIDrug"
-resume_path ="saved_1/AIDrug/Epoch_21_TARGET_0.06_JA_0.5463_DDI_0.06034.model"
-
-
-if not os.path.exists(os.path.join("saved_1", model_name)):
-    os.makedirs(os.path.join("saved_1", model_name))
+resume_path = "saved_1/AIDrug/Epoch_21_TARGET_0.06_JA_0.5463_DDI_0.06034.model"
 
 # Training settings
 parser = argparse.ArgumentParser()
@@ -217,11 +213,14 @@ def eval(model, eval_dataloader,drug_data, voc_size, device, TOKENS, args, ddi_a
 
 def main():
     log_path = "./log/"
+    save_path = os.path.join("saved", args.model_name)
     log_file_name = (
         log_path + "log-" + time.strftime("%Y%m%d-%H%M%S", time.localtime()) + ".log"
     )
     if not os.path.exists(log_path):
         os.makedirs(log_path)
+    if not os.path.exists(save_path):
+        os.makedirs(save_path)
     # 记录正常的 print 信息
     sys.stdout = Logger(log_file_name)
     # 记录 traceback 异常信息
@@ -469,8 +468,7 @@ def main():
                 model.state_dict(),
                 open(
                     os.path.join(
-                        "./saved/",
-                        args.model_name,
+                        save_path,
                         "Epoch_{}_TARGET_{:.2}_JA_{:.4}_DDI_{:.4}.model".format(
                             epoch, args.target_ddi, ja, ddi_rate
                         ),
@@ -509,7 +507,7 @@ def main():
         history,
         open(
             os.path.join(
-                "saved", args.model_name, "history_{}.pkl".format(args.model_name)
+                save_path, "history_{}.pkl".format(args.model_name)
             ),
             "wb",
         ),
