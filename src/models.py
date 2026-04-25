@@ -149,7 +149,7 @@ class AIModel(nn.Module):
                 # used_proc_enc = torch.sum(usedProcEmbedding, dim=1)# torch.Size([1, 112])
                 
                 
-                usedMedembedding = self.used_med_embedding(torch.tensor(usedMed).to(self.device)).sum(dim=1).unsqueeze(dim=0) # torch.Size([1, 112])
+                usedMedembedding = self.used_med_embedding(torch.tensor(usedMed).to(self.device)).sum(dim=0).unsqueeze(dim=0) # torch.Size([1, 112])
                 last_embed1 = self.crosssAtte4(usedMedembedding.unsqueeze(dim=0),usedDiagEmbedding,usedDiagEmbedding)[0] # shape:[1, 1, emb]
                 last_embed2 = self.crosssAtte5(usedMedembedding.unsqueeze(dim=0),usedProcEmbedding,usedProcEmbedding)[0] # [1, 1, emb]
                 used_diag_enc = torch.sum(last_embed1, dim=1)
@@ -518,5 +518,4 @@ class GCNConv(MessagePassing):
 
     def update(self, aggr_out):
         return aggr_out
-
 
