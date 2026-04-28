@@ -294,8 +294,8 @@ def main():
             "wandb is not installed. Install it first or run without --use_wandb."
         )
 
-    device = torch.device("cuda:{}".format(args.cuda))
-    # device = 'cpu'
+    device = torch.device("cpu") if args.cuda < 0 else torch.device("cuda:{}".format(args.cuda))
+    # --cuda -1 runs on CPU
 
     data_all = dill.load(open(args.records_path, "rb"))
     voc = dill.load(open(args.voc_path, "rb"))
