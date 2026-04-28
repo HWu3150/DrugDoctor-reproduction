@@ -424,7 +424,7 @@ def main():
                 data_test, voc_size, shuffle=False, return_tracking=True
             )
             save_dataset = mimic_data(data_test_ordered)
-            save_dataloader = DataLoader(save_dataset, batch_size=1, collate_fn=pad_batch_v2_eval, shuffle=False, pin_memory=True)
+            save_dataloader = DataLoader(save_dataset, batch_size=1, collate_fn=pad_batch_v2_eval, shuffle=False, pin_memory=(args.cuda >= 0))
             with torch.set_grad_enabled(False):
                 eval(model, save_dataloader, drug_data, voc_size, device, TOKENS, args, ddi_adj,
                      med_voc=med_voc, visit_tracking=tracking, save_dir=args.overlay_dir)
