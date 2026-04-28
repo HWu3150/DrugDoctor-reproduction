@@ -76,6 +76,8 @@ parser.add_argument("--kp", type=float, default=0.05, help="coefficient of P sig
 parser.add_argument("--dim", type=int, default=64, help="dimension")
 parser.add_argument("--cuda", type=int, default=0, help="which cuda")
 parser.add_argument('--threshold', type=float, default=0.4, help='the threshold of prediction')
+parser.add_argument('--save_overlay', action='store_true', help='save per-visit predictions as eval_overlay_*.json (same format as expertise pipeline)')
+parser.add_argument('--overlay_dir', type=str, default='overlay_output', help='directory to save eval_overlay_*.json files')
 parser.add_argument(
     "--records_path",
     type=str,
@@ -143,13 +145,24 @@ print(vars(args))
 
 
 # evaluate
-def eval(model, eval_dataloader,drug_data, voc_size, device, TOKENS, args, ddi_adj):
+def eval(model, eval_dataloader, drug_data, voc_size, device, TOKENS, args, ddi_adj,
+         med_voc=None, visit_tracking=None, save_dir=None):
+    """
+    med_voc        : Voc object with idx2word mapping (needed for save_dir)
+    visit_tracking : list of (patient_idx, visit_idx) per visit in dataloader order
+    save_dir       : if set, save eval_overlay_*.json files to this directory
+    """
+    import json as _json, os as _os
+
     model.eval()
     END_TOKEN, DIAG_PAD_TOKEN, PROC_PAD_TOKEN, MED_PAD_TOKEN, SOS_TOKEN = TOKENS
     smm_record = []
     ja, prauc, avg_p, avg_r, avg_f1 = [[] for _ in range(5)]     # 每个visit都要在list里存一个值
     med_cnt, visit_cnt = 0, 0
-    
+    global_visit_idx = 0   # sequential index across all batches
+
+    if save_dir:
+        _os.makedirs(save_dir, exist_ok=True)
 
     for idx, data in enumerate(eval_dataloader):
         y_gt, y_pred, y_pred_prob, y_pred_label = [], [], [], []
@@ -161,13 +174,13 @@ def eval(model, eval_dataloader,drug_data, voc_size, device, TOKENS, args, ddi_a
         m_mask_matrix = m_mask_matrix.to(device)
         d_mask_matrix = d_mask_matrix.to(device)
         p_mask_matrix = p_mask_matrix.to(device)
-        
+
         output_logits, ddi_loss = model(diagnoses, procedures, used_medic,used_diag,used_proc,drug_data,d_mask_matrix, p_mask_matrix)
-        
+
         visit_cnt += len(diagnoses)
-           
+
         # med_true 就是batch-size,voc_size[2] ，就是真实标签，0-1
-        for i in range(len(diagnoses)): 
+        for i in range(len(diagnoses)):
             y_gt = med_true[i]       # groud truth 表示正确的label   0-1序列
 
             current_pre = output_logits[i] #模型预测的数据
@@ -180,18 +193,59 @@ def eval(model, eval_dataloader,drug_data, voc_size, device, TOKENS, args, ddi_a
 
             y_pred = np.zeros(voc_size[2])
             y_pred[y_pred_label] = 1        # 预测的结果标签    0-1序列
-           
-            
+
+
             smm_record.append(y_pred_label) #####
 
             adm_ja, adm_prauc, adm_avg_p, adm_avg_r, adm_avg_f1 = \
                     sequence_metric(np.array(y_gt), np.array(y_pred), np.array(y_pred_prob), np.array(y_pred_label))
-            
-            ja.append(adm_ja) # 
+
+            ja.append(adm_ja) #
             prauc.append(adm_prauc)
             avg_p.append(adm_avg_p)
             avg_r.append(adm_avg_r)
             avg_f1.append(adm_avg_f1)
+
+            # ── save overlay ────────────────────────────────────────────────
+            if save_dir and med_voc is not None:
+                i2w = med_voc.idx2word  # int -> ATC code
+
+                pred_codes = [i2w[int(idx_)] for idx_ in y_pred_label if int(idx_) in i2w]
+                gold_indices = list(np.where(np.array(y_gt) == 1)[0])
+                gold_codes = [i2w[int(idx_)] for idx_ in gold_indices if int(idx_) in i2w]
+
+                # prior meds: used_medic[i] is list of prior-visit med index lists (padded)
+                prior_codes = []
+                if used_medic and i < len(used_medic) and used_medic[i]:
+                    seen = set()
+                    for prior_visit_meds in used_medic[i]:
+                        for m in prior_visit_meds:
+                            m = int(m)
+                            if m in i2w and i2w[m] not in seen:
+                                prior_codes.append(i2w[m])
+                                seen.add(i2w[m])
+
+                # subject_id from tracking or sequential
+                if visit_tracking and global_visit_idx < len(visit_tracking):
+                    p_idx, v_idx = visit_tracking[global_visit_idx]
+                    subject_id = f"test_p{p_idx}_v{v_idx}"
+                else:
+                    subject_id = global_visit_idx
+
+                overlay = {
+                    "idx": global_visit_idx,
+                    "subject_id": subject_id,
+                    "method": "drugdoctor",
+                    "evaluated_pred_codes": pred_codes,
+                    "gold_codes": gold_codes,
+                    "prior_meds": prior_codes,
+                }
+                out_path = _os.path.join(save_dir, f"eval_overlay_{global_visit_idx:04d}.json")
+                with open(out_path, "w") as _f:
+                    _json.dump(overlay, _f)
+            # ────────────────────────────────────────────────────────────────
+
+            global_visit_idx += 1
                 
 
     # ddi rate
@@ -362,6 +416,20 @@ def main():
         model.load_state_dict(torch.load(open(args.resume_path, 'rb'), map_location=torch.device('cpu')))
         model.to(device=device)
         tic = time.time()
+
+        # ── single deterministic pass to save overlay files ──────────────────
+        if args.save_overlay:
+            print(f"Saving eval_overlay_*.json to: {args.overlay_dir}")
+            data_test_ordered, tracking = patient_to_visit(
+                data_test, voc_size, shuffle=False, return_tracking=True
+            )
+            save_dataset = mimic_data(data_test_ordered)
+            save_dataloader = DataLoader(save_dataset, batch_size=1, collate_fn=pad_batch_v2_eval, shuffle=False, pin_memory=True)
+            with torch.set_grad_enabled(False):
+                eval(model, save_dataloader, drug_data, voc_size, device, TOKENS, args, ddi_adj,
+                     med_voc=med_voc, visit_tracking=tracking, save_dir=args.overlay_dir)
+            print(f"Saved {len(data_test_ordered)} overlay files to {args.overlay_dir}")
+        # ─────────────────────────────────────────────────────────────────────
 
         result = []
         for _ in range(10):

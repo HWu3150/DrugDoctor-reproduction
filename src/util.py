@@ -545,7 +545,7 @@ def graph_batch_from_smile(smiles_list):
     return Data(**result)
 
 
-def patient_to_visit(data,voc_size):
+def patient_to_visit(data, voc_size, shuffle=True, return_tracking=False):
     MED_PAD_TOKEN = voc_size[2] + 2
     diag_list, pro_list, med_list = (
         [],
@@ -589,9 +589,9 @@ def patient_to_visit(data,voc_size):
     
     # 为打乱前的indexed_arr数据创建索引列表
     index_table = list(range(len(indexed_arr)))
-    # [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, ...]
-    # 打乱顺序
-    random.shuffle(index_table)
+    # 按需打乱顺序（shuffle=False 时保持病人顺序，用于确定性推理/保存 overlay）
+    if shuffle:
+        random.shuffle(index_table)
     # [14052, 4378, 1563, 13103, 5748, 173, 11349, 10676, 7948, 12293, 11167, 11268, 546, 5900, ...]
 
     # 逐个进行判断，是否遵从打乱？ 只需要保证打乱后的数据的所代表的病人的visit相对顺序不变
@@ -720,11 +720,14 @@ def patient_to_visit(data,voc_size):
     # print("all-visit-size:", len(shuffled_med))
     # print(vars(args))
     d_p_m = []
-    
+
     for a, b, c, d, e, f, g, h in zip(shuffled_diag, shuffled_proc, shuffled_med, used_med, used_diag, used_proc, shuffled_med_emb, used_med_emb):
-        d_p_m.append([a, b, c, d, e, f, g, h])  
+        d_p_m.append([a, b, c, d, e, f, g, h])
         # 将 shuffled_diag 和 shuffled_proc 和 shuffled_med（当前）相关数据
         # med_true.append(d)  # 将 shuffled_med_emb 作为标签 med_true，长度是112的0,1编码
         # used_med, used_diag, used_proc 表示当前visit的先前visit的数据。
         # 其中 used_med 是长度为112，用token填充了，used_diag 和 used_proc是内部list元素长度不固定的list
+    if return_tracking:
+        # final_tuple_list[i] = (patient_idx_in_data, visit_idx_within_patient)
+        return d_p_m, final_tuple_list
     return d_p_m
